@@ -1,0 +1,18 @@
+# Environment variables
+.env
+
+# Go modules cache
+/bin/
+/pkg/
+
+# Temporary files
+*.log
+*.tmp
+*.swp
+
+# IDE files
+.idea/
+*.iml
+
+# QR code temp files
+qr_*.png
