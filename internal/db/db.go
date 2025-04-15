@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"bot/internal/config"
 	_ "github.com/lib/pq"
+	"github.com/skyzeper/telegram-bot/internal/config"
 )
 
 func Connect(cfg *config.Config) (*sql.DB, error) {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"bot/internal/services/user"
+	"github.com/skyzeper/telegram-bot/internal/services/user"
 )
 
 func CheckAccess(ctx context.Context, chatID int64, db *sql.DB) bool {

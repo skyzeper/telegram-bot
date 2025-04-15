@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bot/internal/state"
 	"context"
 	"log"
 	"os"
@@ -9,11 +8,11 @@ import (
 	"sync"
 	"syscall"
 
-	"bot/internal/config"
-	"bot/internal/db"
-	"bot/internal/handlers"
-	"bot/internal/security"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/skyzeper/telegram-bot/internal/config"
+	"github.com/skyzeper/telegram-bot/internal/db"
+	"github.com/skyzeper/telegram-bot/internal/handlers"
+	"github.com/skyzeper/telegram-bot/internal/security"
 )
 
 func main() {
@@ -26,11 +25,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer dbConn.Close()
+	defer func() {
+		if err := dbConn.Close(); err != nil {
+			log.Printf("Failed to close DB: %v", err)
+		}
+	}()
 
 	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
 	if err != nil {
-		log.Fatalf("Failed to initialize bot: %v", err)
+		log.Fatalf("Failed to initialize bot: invalid token: %v", err)
 	}
 
 	bot.Debug = cfg.Env == "dev"
@@ -57,8 +60,7 @@ func main() {
 					}
 				} else if update.CallbackQuery != nil {
 					if security.CheckAccess(ctx, update.CallbackQuery.From.ID, dbConn) {
-						handler := handlers.NewHandler(dbConn, state.NewStateManager())
-						handler.HandleCallback(ctx, bot, update.CallbackQuery, dbConn)
+						handlers.HandleCallback(ctx, bot, update.CallbackQuery, dbConn)
 					}
 				}
 			}

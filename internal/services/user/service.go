@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 
-	"bot/internal/models"
-	"bot/internal/state"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/skyzeper/telegram-bot/internal/models"
+	"github.com/skyzeper/telegram-bot/internal/state"
 )
 
 type Service struct {

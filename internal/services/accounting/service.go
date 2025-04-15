@@ -1,10 +1,10 @@
 package accounting
 
 import (
-	"bot/internal/models"
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/skyzeper/telegram-bot/internal/models"
 )
 
 type Service struct {

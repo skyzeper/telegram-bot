@@ -1,11 +1,11 @@
 package executor
 
 import (
-	"bot/internal/models"
-	"bot/internal/services/notification"
 	"context"
 	"database/sql"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/skyzeper/telegram-bot/internal/models"
+	"github.com/skyzeper/telegram-bot/internal/services/notification"
 )
 
 type Service struct {

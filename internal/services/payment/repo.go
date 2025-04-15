@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"bot/internal/models"
+	"github.com/skyzeper/telegram-bot/internal/models"
 )
 
 type Repository struct {
