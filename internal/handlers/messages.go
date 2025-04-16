@@ -1,82 +1,268 @@
 package handlers
 
 import (
-	"context"
-	"database/sql"
-
+	"fmt"
+	"strings"
+	"time"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/skyzeper/telegram-bot/internal/handlers/callbacks"
 	"github.com/skyzeper/telegram-bot/internal/menus"
+	"github.com/skyzeper/telegram-bot/internal/models"
+	"github.com/skyzeper/telegram-bot/internal/security"
 	"github.com/skyzeper/telegram-bot/internal/services/chat"
+	"github.com/skyzeper/telegram-bot/internal/services/notification"
 	"github.com/skyzeper/telegram-bot/internal/services/order"
-	"github.com/skyzeper/telegram-bot/internal/services/referral"
 	"github.com/skyzeper/telegram-bot/internal/services/user"
 	"github.com/skyzeper/telegram-bot/internal/state"
 )
 
+// Handler manages incoming Telegram updates
 type Handler struct {
-	users    *user.Service
-	orders   *order.Service
-	chat     *chat.Service
-	referral *referral.Service
-	states   *state.StateManager
+	bot                *tgbotapi.BotAPI
+	security           *security.SecurityChecker
+	menus              *menus.MenuGenerator
+	userService        *user.Service
+	orderService       *order.Service
+	chatService        *chat.Service
+	state              *state.Manager
+	callbackHandler    *callbacks.CallbackHandler
+	notificationService *notification.Service
 }
 
-func NewHandler(db *sql.DB, states *state.StateManager) *Handler {
+// NewHandler creates a new Handler
+func NewHandler(
+	bot *tgbotapi.BotAPI,
+	security *security.SecurityChecker,
+	menus *menus.MenuGenerator,
+	userService *user.Service,
+	orderService *order.Service,
+	chatService *chat.Service,
+	state *state.Manager,
+	callbackHandler *callbacks.CallbackHandler,
+	notificationService *notification.Service,
+) *Handler {
 	return &Handler{
-		users:    user.NewService(db, states),
-		orders:   order.NewService(db, states),
-		chat:     chat.NewService(db),
-		referral: referral.NewService(db),
-		states:   states,
+		bot:                bot,
+		security:           security,
+		menus:              menus,
+		userService:        userService,
+		orderService:       orderService,
+		chatService:        chatService,
+		state:              state,
+		callbackHandler:    callbackHandler,
+		notificationService: notificationService,
 	}
 }
 
-func HandleMessage(ctx context.Context, bot *tgbotapi.BotAPI, msg *tgbotapi.Message, db *sql.DB) {
-	handler := NewHandler(db, state.NewStateManager())
-	user, err := handler.users.GetUser(ctx, msg.Chat.ID)
-	if err != nil && msg.Text != "/start" {
-		bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "🚫 Пожалуйста, начните с /start"))
+// HandleUpdate processes incoming Telegram updates
+func (h *Handler) HandleUpdate(update *tgbotapi.Update) {
+	if update.Message == nil {
+		if update.CallbackQuery != nil {
+			h.callbackHandler.HandleCallback(update.CallbackQuery)
+		}
 		return
 	}
 
-	if msg.Text == "/start" {
+	chatID := update.Message.Chat.ID
+	currentState := h.state.Get(chatID)
+
+	// Check if user exists, create if not
+	user, err := h.userService.GetUser(chatID)
+	if err != nil {
+		err = h.security.CreateUser(
+			chatID,
+			"client",
+			update.Message.From.FirstName,
+			update.Message.From.LastName,
+			update.Message.From.UserName,
+			"",
+		)
 		if err != nil {
-			handler.users.Register(ctx, msg.Chat.ID, msg.From.FirstName, msg.From.LastName)
+			h.sendMessage(chatID, "❌ Ошибка регистрации. Попробуйте позже.", nil)
+			return
 		}
-		var menu tgbotapi.InlineKeyboardMarkup
-		switch user.Role {
-		case "user":
-			menu = menus.UserMenu()
-		case "operator":
-			menu = menus.OperatorMenu()
-		case "main_operator":
-			menu = menus.MainOperatorMenu()
-		case "driver":
-			menu = menus.DriverMenu()
-		case "loader":
-			menu = menus.LoaderMenu()
-		case "owner":
-			menu = menus.OwnerMenu()
-		}
-		msgConfig := tgbotapi.NewMessage(msg.Chat.ID, "🚛 Заказ за 30 минут! 🔥 Лучшая цена! 😎 Простое оформление!")
-		msgConfig.ReplyMarkup = menu
-		bot.Send(msgConfig)
+		user = &models.User{ChatID: chatID, Role: "client"}
+	}
+
+	// Handle commands
+	if update.Message.IsCommand() {
+		h.handleCommand(update, user)
 		return
 	}
 
-	currentState := handler.states.Get(msg.Chat.ID)
+	// Handle state-based interactions
 	if currentState.Module != "" {
 		switch currentState.Module {
-		case "create_order":
-			handler.orders.HandleOrderSteps(ctx, msg.Chat.ID, msg, bot)
-		case "add_staff":
-			handler.users.HandleStaffSteps(msg.Chat.ID, msg, bot)
+		case "order":
+			// Delegate to order steps handler
+			// Note: This is handled in order/steps.go
+			return
 		case "chat":
-			handler.chat.HandleChat(ctx, msg, bot)
+			h.handleChatMessage(update)
+			return
 		}
+	}
+
+	// Handle text messages
+	h.handleTextMessage(update, user)
+}
+
+// handleCommand processes Telegram commands
+func (h *Handler) handleCommand(update *tgbotapi.Update, user *models.User) {
+	chatID := update.Message.Chat.ID
+	command := update.Message.Command()
+
+	switch command {
+	case "start":
+		h.sendMessage(chatID, "Добро пожаловать! 🚛 Выберите действие:", h.menus.MainMenu(user))
+	case "help":
+		h.sendMessage(chatID, "📚 Помощь: Используйте меню для заказа услуг, связи с оператором или приглашения друзей.", h.menus.MainMenu(user))
+	default:
+		h.sendMessage(chatID, "❓ Неизвестная команда. Используйте /start или /help.", h.menus.MainMenu(user))
+	}
+}
+
+// handleTextMessage processes text messages
+func (h *Handler) handleTextMessage(update *tgbotapi.Update, user *models.User) {
+	chatID := update.Message.Chat.ID
+	messageText := strings.ToLower(update.Message.Text)
+
+	switch messageText {
+	case "🗑️ заказать услугу":
+		role, err := h.security.GetUserRole(chatID)
+		if err != nil {
+			h.sendMessage(chatID, "❌ Ошибка проверки доступа. Попробуйте позже.", nil)
+			return
+		}
+		if role == "client" || role == "operator" || role == "main_operator" || role == "owner" {
+			h.state.Set(chatID, state.State{
+				Module:     "order",
+				Step:       1,
+				TotalSteps: 11,
+				Data:       make(map[string]interface{}),
+			})
+			h.sendMessage(chatID, "🗑️ Выберите категорию заказа:", h.menus.CategoryMenu())
+		} else {
+			h.sendMessage(chatID, "❌ У вас нет доступа к заказам.", nil)
+		}
+
+	case "📞 связаться с оператором":
+		role, err := h.security.GetUserRole(chatID)
+		if err != nil {
+			h.sendMessage(chatID, "❌ Ошибка проверки доступа. Попробуйте позже.", nil)
+			return
+		}
+		if role == "client" || role == "operator" || role == "main_operator" || role == "owner" {
+			h.state.Set(chatID, state.State{
+				Module:     "chat",
+				Step:       1,
+				TotalSteps: 1,
+				Data:       make(map[string]interface{}),
+			})
+			h.sendMessage(chatID, "💬 Напишите ваш вопрос, и оператор ответит вам:", nil)
+		} else {
+			h.sendMessage(chatID, "❌ У вас нет доступа к чату.", nil)
+		}
+
+	case "🔗 приглашайте друзей и зарабатывайте!":
+		role, err := h.security.GetUserRole(chatID)
+		if err != nil {
+			h.sendMessage(chatID, "❌ Ошибка проверки доступа. Попробуйте позже.", nil)
+			return
+		}
+		if role == "client" || role == "operator" || role == "main_operator" || role == "owner" {
+			h.sendMessage(chatID, "🔗 Поделитесь ссылкой для приглашения друзей:", h.menus.ReferralMenu())
+		} else {
+			h.sendMessage(chatID, "❌ У вас нет доступа к реферальной программе.", nil)
+		}
+
+	case "📋 заказы":
+		role, err := h.security.GetUserRole(chatID)
+		if err != nil {
+			h.sendMessage(chatID, "❌ Ошибка проверки доступа. Попробуйте позже.", nil)
+			return
+		}
+		if role == "operator" || role == "main_operator" || role == "owner" {
+			h.sendMessage(chatID, "📋 Выберите категорию заказов:", h.menus.NewOrdersMenu(nil))
+		} else {
+			h.sendMessage(chatID, "❌ У вас нет доступа к заказам.", nil)
+		}
+
+	case "🧑‍💼 управление штатом":
+		role, err := h.security.GetUserRole(chatID)
+		if err != nil {
+			h.sendMessage(chatID, "❌ Ошибка проверки доступа. Попробуйте позже.", nil)
+			return
+		}
+		if role == "main_operator" || role == "owner" {
+			h.sendMessage(chatID, "🧑‍💼 Управление штатом:", h.menus.StaffMenu(chatID))
+		} else {
+			h.sendMessage(chatID, "❌ У вас нет доступа к управлению штатом.", nil)
+		}
+
+	case "📊 статистика":
+		role, err := h.security.GetUserRole(chatID)
+		if err != nil {
+			h.sendMessage(chatID, "❌ Ошибка проверки доступа. Попробуйте позже.", nil)
+			return
+		}
+		if role == "owner" {
+			h.sendMessage(chatID, "📊 Выберите период статистики:", nil)
+		} else {
+			h.sendMessage(chatID, "❌ У вас нет доступа к статистике.", nil)
+		}
+
+	default:
+		h.sendMessage(chatID, "❓ Пожалуйста, выберите действие из меню:", h.menus.MainMenu(user))
+	}
+}
+
+// handleChatMessage processes messages in chat mode
+func (h *Handler) handleChatMessage(update *tgbotapi.Update) {
+	chatID := update.Message.Chat.ID
+	messageText := update.Message.Text
+
+	// Save user message
+	err := h.chatService.SaveMessage(chatID, messageText, true)
+	if err != nil {
+		h.sendMessage(chatID, "❌ Ошибка отправки сообщения. Попробуйте позже.", nil)
 		return
 	}
 
-	// Если сообщение не команда и не часть шага, перенаправляем в чат
-	handler.chat.HandleChat(ctx, msg, bot)
+	// Notify operator
+	operatorID, err := h.chatService.GetActiveOperator()
+	if err != nil {
+		h.sendMessage(chatID, "❌ Нет доступных операторов. Попробуйте позже.", nil)
+		return
+	}
+
+	notification := &models.Notification{
+		UserID:    operatorID,
+		Type:      "chat_message",
+		Message:   fmt.Sprintf("Новое сообщение от пользователя %d: %s", chatID, messageText),
+		CreatedAt: time.Now(),
+	}
+	err = h.notificationService.CreateNotification(notification)
+	if err != nil {
+		h.sendMessage(chatID, "❌ Ошибка уведомления оператора. Попробуйте позже.", nil)
+		return
+	}
+
+	h.sendMessage(chatID, "✅ Сообщение отправлено! Оператор скоро ответит.", nil)
+}
+
+// sendMessage sends a message to a chat
+func (h *Handler) sendMessage(chatID int64, text string, replyMarkup interface{}) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	if replyMarkup != nil {
+		switch rm := replyMarkup.(type) {
+		case tgbotapi.ReplyKeyboardMarkup:
+			msg.ReplyMarkup = rm
+		case tgbotapi.InlineKeyboardMarkup:
+			msg.ReplyMarkup = rm
+		}
+	}
+	if _, err := h.bot.Send(msg); err != nil {
+		fmt.Printf("Failed to send message: %v\n", err)
+	}
 }

@@ -1,42 +1,62 @@
 package payment
 
 import (
-	"context"
-	"database/sql"
-
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"errors"
+	"time"
 	"github.com/skyzeper/telegram-bot/internal/models"
 )
 
+// Service handles payment-related business logic
 type Service struct {
-	repo *Repository
+	repo Repository
 }
 
-func NewService(db *sql.DB) *Service {
-	return &Service{
-		repo: NewRepository(db),
-	}
+// Repository defines the interface for payment data access
+type Repository interface {
+	CreatePayment(payment *models.Payment) error
+	GetPendingPayments(orderID int) ([]models.Payment, error)
+	ConfirmPayment(orderID int, driverID int64) error
+	GetPayment(orderID int, driverID int64) (*models.Payment, error)
 }
 
-func (s *Service) CreatePayment(ctx context.Context, orderID, userID int64, amount float64, method string) error {
-	payment := &models.Payment{
-		OrderID: orderID,
-		UserID:  userID,
-		Amount:  amount,
-		Method:  method,
-	}
-	return s.repo.CreatePayment(ctx, payment)
+// NewService creates a new payment service
+func NewService(repo Repository) *Service {
+	return &Service{repo: repo}
 }
 
-func (s *Service) ConfirmPayment(ctx context.Context, paymentID int64, bot *tgbotapi.BotAPI) error {
-	payment, err := s.repo.GetPayment(ctx, paymentID)
-	if err != nil {
-		return err
+// CreatePayment creates a new payment
+func (s *Service) CreatePayment(payment *models.Payment) error {
+	if payment.OrderID <= 0 || payment.UserID <= 0 || payment.Amount <= 0 || payment.Method == "" {
+		return errors.New("missing required payment fields")
 	}
-	payment.Confirmed = true
-	if err := s.repo.UpdatePayment(ctx, payment); err != nil {
-		return err
+
+	if payment.CreatedAt.IsZero() {
+		payment.CreatedAt = time.Now()
 	}
-	bot.Send(tgbotapi.NewMessage(payment.UserID, "Оплата подтверждена"))
-	return nil
+
+	return s.repo.CreatePayment(payment)
+}
+
+// GetPendingPayments retrieves pending payments for an order
+func (s *Service) GetPendingPayments(orderID int) ([]models.Payment, error) {
+	if orderID <= 0 {
+		return nil, errors.New("invalid order ID")
+	}
+	return s.repo.GetPendingPayments(orderID)
+}
+
+// ConfirmPayment confirms a payment
+func (s *Service) ConfirmPayment(orderID int, driverID int64) error {
+	if orderID <= 0 || driverID <= 0 {
+		return errors.New("invalid order or driver ID")
+	}
+	return s.repo.ConfirmPayment(orderID, driverID)
+}
+
+// GetPayment retrieves a specific payment
+func (s *Service) GetPayment(orderID int, driverID int64) (*models.Payment, error) {
+	if orderID <= 0 || driverID <= 0 {
+		return nil, errors.New("invalid order or driver ID")
+	}
+	return s.repo.GetPayment(orderID, driverID)
 }

@@ -1,46 +1,60 @@
 package executor
 
 import (
-	"context"
-	"database/sql"
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"errors"
 	"github.com/skyzeper/telegram-bot/internal/models"
-	"github.com/skyzeper/telegram-bot/internal/services/notification"
 )
 
+// Service handles executor-related business logic
 type Service struct {
-	repo   *Repository
-	notify *notification.Service
+	repo Repository
 }
 
-func NewService(db *sql.DB, notify *notification.Service) *Service {
-	return &Service{
-		repo:   NewRepository(db),
-		notify: notify,
-	}
+// Repository defines the interface for executor data access
+type Repository interface {
+	AssignExecutor(orderID int, userID int64, role string) error
+	RemoveExecutor(orderID int, userID int64) error
+	GetExecutors(orderID int) ([]models.Executor, error)
+	ConfirmExecutor(orderID int, userID int64) error
 }
 
-func (s *Service) AssignExecutor(ctx context.Context, orderID, userID int64, role string) error {
-	executor := &models.Executor{
-		OrderID: orderID,
-		UserID:  userID,
-		Role:    role,
-	}
-	if err := s.repo.CreateExecutor(ctx, executor); err != nil {
-		return err
-	}
-	return s.notify.SendExecutorNotification(ctx, orderID, userID)
+// NewService creates a new executor service
+func NewService(repo Repository) *Service {
+	return &Service{repo: repo}
 }
 
-func (s *Service) ConfirmExecutor(ctx context.Context, orderID, userID int64, bot *tgbotapi.BotAPI) error {
-	executor, err := s.repo.GetExecutor(ctx, orderID, userID)
-	if err != nil {
-		return err
+// AssignExecutor assigns an executor to an order
+func (s *Service) AssignExecutor(orderID int, userID int64, role string) error {
+	if orderID <= 0 || userID <= 0 {
+		return errors.New("invalid order or user ID")
 	}
-	executor.Confirmed = true
-	if err := s.repo.UpdateExecutor(ctx, executor); err != nil {
-		return err
+	if role != "driver" && role != "loader" {
+		return errors.New("invalid role")
 	}
-	bot.Send(tgbotapi.NewMessage(userID, "Заказ подтверждён"))
-	return nil
+
+	return s.repo.AssignExecutor(orderID, userID, role)
+}
+
+// RemoveExecutor removes an executor from an order
+func (s *Service) RemoveExecutor(orderID int, userID int64) error {
+	if orderID <= 0 || userID <= 0 {
+		return errors.New("invalid order or user ID")
+	}
+	return s.repo.RemoveExecutor(orderID, userID)
+}
+
+// GetExecutors retrieves all executors for an order
+func (s *Service) GetExecutors(orderID int) ([]models.Executor, error) {
+	if orderID <= 0 {
+		return nil, errors.New("invalid order ID")
+	}
+	return s.repo.GetExecutors(orderID)
+}
+
+// ConfirmExecutor confirms an executor's completion
+func (s *Service) ConfirmExecutor(orderID int, userID int64) error {
+	if orderID <= 0 || userID <= 0 {
+		return errors.New("invalid order or user ID")
+	}
+	return s.repo.ConfirmExecutor(orderID, userID)
 }

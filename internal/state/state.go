@@ -4,54 +4,44 @@ import (
 	"sync"
 )
 
+// State represents the state of a user interaction
 type State struct {
-	Step       int
-	TotalSteps int
-	Module     string
-	Data       map[string]interface{}
+	Module     string                 `json:"module"`
+	Step       int                    `json:"step"`
+	TotalSteps int                    `json:"total_steps"`
+	Data       map[string]interface{} `json:"data"`
 }
 
-type StateManager struct {
-	states  map[int64]State
-	history map[int64][]State
-	mu      sync.RWMutex
+// Manager manages user states
+type Manager struct {
+	states map[int64]State
+	mutex  sync.Mutex
 }
 
-func NewStateManager() *StateManager {
-	return &StateManager{
-		states:  make(map[int64]State),
-		history: make(map[int64][]State),
+// NewManager creates a new state manager
+func NewManager() *Manager {
+	return &Manager{
+		states: make(map[int64]State),
 	}
 }
 
-func (sm *StateManager) Set(chatID int64, state State) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	sm.history[chatID] = append(sm.history[chatID], sm.states[chatID])
-	sm.states[chatID] = state
+// Get retrieves the state for a chat ID
+func (m *Manager) Get(chatID int64) State {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	return m.states[chatID]
 }
 
-func (sm *StateManager) Get(chatID int64) State {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.states[chatID]
+// Set updates the state for a chat ID
+func (m *Manager) Set(chatID int64, state State) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.states[chatID] = state
 }
 
-func (sm *StateManager) Back(chatID int64) State {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if len(sm.history[chatID]) > 0 {
-		last := sm.history[chatID][len(sm.history[chatID])-1]
-		sm.history[chatID] = sm.history[chatID][:len(sm.history[chatID])-1]
-		sm.states[chatID] = last
-		return last
-	}
-	return sm.states[chatID]
-}
-
-func (sm *StateManager) Clear(chatID int64) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	delete(sm.states, chatID)
-	delete(sm.history, chatID)
+// Clear removes the state for a chat ID
+func (m *Manager) Clear(chatID int64) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	delete(m.states, chatID)
 }

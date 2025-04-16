@@ -1,50 +1,136 @@
 package accounting
 
 import (
-	"context"
-	"database/sql"
+	"errors"
 	"fmt"
+	"time"
 	"github.com/skyzeper/telegram-bot/internal/models"
 )
 
+// Service handles accounting-related business logic
 type Service struct {
-	repo *Repository
+	repo Repository
 }
 
-func NewService(db *sql.DB) *Service {
-	return &Service{
-		repo: NewRepository(db),
+// Repository defines the interface for accounting data access
+type Repository interface {
+	CreateRecord(record *models.AccountingRecord) error
+	GetRecordsByOrder(orderID int) ([]models.AccountingRecord, error)
+	GetRecordsByUser(userID int64) ([]models.AccountingRecord, error)
+	GetRecordsByType(recordType string) ([]models.AccountingRecord, error)
+	UpdateRecord(record *models.AccountingRecord) error
+}
+
+// NewService creates a new accounting service
+func NewService(repo Repository) *Service {
+	return &Service{repo: repo}
+}
+
+// CreateRecord creates a new accounting record
+func (s *Service) CreateRecord(record *models.AccountingRecord) error {
+	if record.UserID <= 0 || record.Type == "" || record.Amount == 0 {
+		return errors.New("missing required accounting fields")
 	}
+
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now()
+	}
+
+	return s.repo.CreateRecord(record)
 }
 
-func (s *Service) LogExpense(ctx context.Context, orderID, userID int64, expenseType string, amount float64, description string) error {
+// RecordIncome records an income entry
+func (s *Service) RecordIncome(orderID int, userID int64, amount float64, description string) error {
+	if orderID <= 0 || userID <= 0 || amount <= 0 {
+		return errors.New("invalid order ID, user ID, or amount")
+	}
+
 	record := &models.AccountingRecord{
 		OrderID:     orderID,
 		UserID:      userID,
-		Type:        expenseType,
+		Type:        "income",
 		Amount:      amount,
 		Description: description,
+		CreatedAt:   time.Now(),
 	}
-	if err := s.repo.CreateRecord(ctx, record); err != nil {
-		return err
-	}
-	return s.updateExcel(record)
+
+	return s.repo.CreateRecord(record)
 }
 
-func (s *Service) updateExcel(record *models.AccountingRecord) error {
-	f := excelize.NewFile()
-	defer f.Close()
-	f.SetCellValue("Sheet1", "A1", "Date")
-	f.SetCellValue("Sheet1", "B1", "OrderID")
-	f.SetCellValue("Sheet1", "C1", "UserID")
-	f.SetCellValue("Sheet1", "D1", "Type")
-	f.SetCellValue("Sheet1", "E1", "Amount")
-	f.SetCellValue("Sheet1", "F1", "Description")
-	f.SetCellValue("Sheet1", "A2", record.CreatedAt.Format("2006-01-02"))
-	f.SetCellValue("Sheet1", "B2", record.OrderID)
-	f.SetCellValue("Sheet1", "C2", record.UserID)
-	f.SetCellValue("Sheet1", "D2", record.Type)
-	f.SetCellValue("Sheet1", "E2", record.Amount)
-	f.SetCellValue("Sheet1", "F2", record.Description)
-	return f.SaveAs(fmt.Sprintf("bot/accounting/drivers/%s/driver_%d.xlsx", record.CreatedAt.Format("January_2006"), record.UserID))
+// RecordExpense records an expense entry
+func (s *Service) RecordExpense(userID int64, amount float64, description string) error {
+	if userID <= 0 || amount <= 0 {
+		return errors.New("invalid user ID or amount")
+	}
+
+	record := &models.AccountingRecord{
+		UserID:      userID,
+		Type:        "expense",
+		Amount:      -amount, // Expenses are negative
+		Description: description,
+		CreatedAt:   time.Now(),
+	}
+
+	return s.repo.CreateRecord(record)
+}
+
+// RecordSalary records a salary payment
+func (s *Service) RecordSalary(userID int64, amount float64, description string) error {
+	if userID <= 0 || amount <= 0 {
+		return errors.New("invalid user ID or amount")
+	}
+
+	record := &models.AccountingRecord{
+		UserID:      userID,
+		Type:        "salary",
+		Amount:      -amount, // Salaries are negative (payout)
+		Description: description,
+		CreatedAt:   time.Now(),
+	}
+
+	return s.repo.CreateRecord(record)
+}
+
+// GetDriverDebt calculates the total debt for a driver
+func (s *Service) GetDriverDebt(userID int64) (float64, error) {
+	if userID <= 0 {
+		return 0, errors.New("invalid user ID")
+	}
+
+	records, err := s.repo.GetRecordsByUser(userID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get records: %v", err)
+	}
+
+	var debt float64
+	for _, record := range records {
+		if record.Type == "expense" || record.Type == "salary" {
+			debt += record.Amount // Negative amounts increase debt
+		}
+	}
+	return debt, nil
+}
+
+// GetRecordsByOrder retrieves accounting records for an order
+func (s *Service) GetRecordsByOrder(orderID int) ([]models.AccountingRecord, error) {
+	if orderID <= 0 {
+		return nil, errors.New("invalid order ID")
+	}
+	return s.repo.GetRecordsByOrder(orderID)
+}
+
+// GetRecordsByUser retrieves accounting records for a user
+func (s *Service) GetRecordsByUser(userID int64) ([]models.AccountingRecord, error) {
+	if userID <= 0 {
+		return nil, errors.New("invalid user ID")
+	}
+	return s.repo.GetRecordsByUser(userID)
+}
+
+// GetRecordsByType retrieves accounting records by type
+func (s *Service) GetRecordsByType(recordType string) ([]models.AccountingRecord, error) {
+	if recordType == "" {
+		return nil, errors.New("invalid record type")
+	}
+	return s.repo.GetRecordsByType(recordType)
 }

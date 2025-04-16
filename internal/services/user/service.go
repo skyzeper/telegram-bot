@@ -1,133 +1,84 @@
 package user
 
 import (
-	"context"
-	"database/sql"
-	"fmt"
-
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"errors"
+	"time"
 	"github.com/skyzeper/telegram-bot/internal/models"
-	"github.com/skyzeper/telegram-bot/internal/state"
 )
 
+// Service handles user-related business logic
 type Service struct {
-	repo   *Repository
-	states *state.StateManager
+	repo Repository
 }
 
-func NewService(db *sql.DB, states *state.StateManager) *Service {
-	return &Service{
-		repo:   NewRepository(db),
-		states: states,
-	}
+// Repository defines the interface for user data access
+type Repository interface {
+	CreateUser(user *models.User) error
+	GetUser(chatID int64) (*models.User, error)
+	GetUserByRole(chatID int64, role string) (*models.User, error)
+	ListUsersByRole(role string) ([]models.User, error)
+	UpdateUser(user *models.User) error
+	DeleteUser(chatID int64) error
 }
 
-func (s *Service) Register(ctx context.Context, chatID int64, firstName, lastName string) error {
-	user := &models.User{
-		ChatID:    chatID,
-		Role:      "user",
-		FirstName: firstName,
-		LastName:  lastName,
-	}
-	return s.repo.CreateUser(ctx, user)
+// NewService creates a new user service
+func NewService(repo Repository) *Service {
+	return &Service{repo: repo}
 }
 
-func (s *Service) GetUser(ctx context.Context, chatID int64) (*models.User, error) {
-	return s.repo.GetUserByChatID(ctx, chatID)
+// CreateUser creates a new user
+func (s *Service) CreateUser(user *models.User) error {
+	if user.ChatID == 0 || user.Role == "" {
+		return errors.New("missing required user fields")
+	}
+
+	if user.CreatedAt.IsZero() {
+		user.CreatedAt = time.Now()
+	}
+	if user.UpdatedAt.IsZero() {
+		user.UpdatedAt = time.Now()
+	}
+
+	return s.repo.CreateUser(user)
 }
 
-func (s *Service) AddStaff(ctx context.Context, chatID int64, bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	currentState := s.states.Get(chatID)
-	switch currentState.Step {
-	case 0:
-		s.states.Set(chatID, state.State{
-			Step:       1,
-			TotalSteps: 5,
-			Module:     "add_staff",
-			Data:       map[string]interface{}{},
-		})
-		bot.Send(tgbotapi.NewMessage(chatID, "Шаг 1/5: Введите имя сотрудника"))
-	case 1:
-		currentState.Data["first_name"] = msg.Text
-		s.states.Set(chatID, state.State{
-			Step:       2,
-			TotalSteps: 5,
-			Module:     "add_staff",
-			Data:       currentState.Data,
-		})
-		bot.Send(tgbotapi.NewMessage(chatID, "Шаг 2/5: Введите фамилию"))
-	case 2:
-		currentState.Data["last_name"] = msg.Text
-		s.states.Set(chatID, state.State{
-			Step:       3,
-			TotalSteps: 5,
-			Module:     "add_staff",
-			Data:       currentState.Data,
-		})
-		bot.Send(tgbotapi.NewMessage(chatID, "Шаг 3/5: Введите уникальный позывной"))
-	case 3:
-		currentState.Data["nickname"] = msg.Text
-		s.states.Set(chatID, state.State{
-			Step:       4,
-			TotalSteps: 5,
-			Module:     "add_staff",
-			Data:       currentState.Data,
-		})
-		bot.Send(tgbotapi.NewMessage(chatID, "Шаг 4/5: Введите телефон (+7XXX-XXX-XX-XX)"))
-	case 4:
-		currentState.Data["phone"] = msg.Text
-		s.states.Set(chatID, state.State{
-			Step:       5,
-			TotalSteps: 5,
-			Module:     "add_staff",
-			Data:       currentState.Data,
-		})
-		msgConfig := tgbotapi.NewMessage(chatID, "Шаг 5/5: Выберите роль")
-		msgConfig.ReplyMarkup = tgbotapi.NewReplyKeyboard(
-			tgbotapi.NewKeyboardButtonRow(
-				tgbotapi.NewKeyboardButton("Оператор"),
-				tgbotapi.NewKeyboardButton("Водитель"),
-				tgbotapi.NewKeyboardButton("Грузчик"),
-			),
-			tgbotapi.NewKeyboardButtonRow(
-				tgbotapi.NewKeyboardButton("Главный оператор"),
-			),
-		)
-		bot.Send(msgConfig)
-	case 5:
-		role := map[string]string{
-			"Оператор":         "operator",
-			"Водитель":         "driver",
-			"Грузчик":          "loader",
-			"Главный оператор": "main_operator",
-		}[msg.Text]
-		user := &models.User{
-			ChatID:    chatID,
-			Role:      role,
-			FirstName: currentState.Data["first_name"].(string),
-			LastName:  currentState.Data["last_name"].(string),
-			Nickname:  currentState.Data["nickname"].(string),
-			Phone:     currentState.Data["phone"].(string),
-		}
-		if err := s.repo.CreateUser(ctx, user); err != nil {
-			bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка: %v", err)))
-			return
-		}
-		s.states.Clear(chatID)
-		msgConfig := tgbotapi.NewMessage(chatID, "Сотрудник добавлен")
-		msgConfig.ReplyMarkup = tgbotapi.ReplyKeyboardRemove{}
-		bot.Send(msgConfig)
+// GetUser retrieves a user by ChatID
+func (s *Service) GetUser(chatID int64) (*models.User, error) {
+	if chatID <= 0 {
+		return nil, errors.New("invalid chat ID")
 	}
+	return s.repo.GetUser(chatID)
 }
 
-func (s *Service) BlockUser(ctx context.Context, chatID int64, targetChatID int64, reason string) error {
-	user, err := s.repo.GetUserByChatID(ctx, targetChatID)
-	if err != nil {
-		return err
+// GetUserByRole retrieves a user by ChatID and role
+func (s *Service) GetUserByRole(chatID int64, role string) (*models.User, error) {
+	if chatID <= 0 || role == "" {
+		return nil, errors.New("invalid chat ID or role")
 	}
-	user.IsBlocked = true
-	if err := s.repo.UpdateUser(ctx, user); err != nil {
-		return err
+	return s.repo.GetUserByRole(chatID, role)
+}
+
+// ListUsersByRole retrieves users by role
+func (s *Service) ListUsersByRole(role string) ([]models.User, error) {
+	if role == "" {
+		return nil, errors.New("role cannot be empty")
 	}
-	return s.repo.LogBlock(ctx, targetChatID, reason)
+	return s.repo.ListUsersByRole(role)
+}
+
+// UpdateUser updates an existing user
+func (s *Service) UpdateUser(user *models.User) error {
+	if user.ChatID <= 0 {
+		return errors.New("invalid chat ID")
+	}
+	user.UpdatedAt = time.Now()
+	return s.repo.UpdateUser(user)
+}
+
+// DeleteUser deletes a user
+func (s *Service) DeleteUser(chatID int64) error {
+	if chatID <= 0 {
+		return errors.New("invalid chat ID")
+	}
+	return s.repo.DeleteUser(chatID)
 }

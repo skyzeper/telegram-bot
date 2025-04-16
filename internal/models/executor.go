@@ -2,9 +2,10 @@ package models
 
 import "time"
 
+// Executor represents an executor assigned to an order
 type Executor struct {
-	ID        int64     `json:"id"`
-	OrderID   int64     `json:"order_id"`
+	ID        int       `json:"id"`
+	OrderID   int       `json:"order_id"`
 	UserID    int64     `json:"user_id"`
 	Role      string    `json:"role"`
 	Confirmed bool      `json:"confirmed"`

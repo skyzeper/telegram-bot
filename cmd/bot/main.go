@@ -1,77 +1,107 @@
 package main
 
 import (
-	"context"
-	"log"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
-
+	"fmt"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/skyzeper/telegram-bot/internal/config"
 	"github.com/skyzeper/telegram-bot/internal/db"
 	"github.com/skyzeper/telegram-bot/internal/handlers"
+	"github.com/skyzeper/telegram-bot/internal/handlers/callbacks"
+	"github.com/skyzeper/telegram-bot/internal/menus"
 	"github.com/skyzeper/telegram-bot/internal/security"
+	"github.com/skyzeper/telegram-bot/internal/services/accounting"
+	"github.com/skyzeper/telegram-bot/internal/services/chat"
+	"github.com/skyzeper/telegram-bot/internal/services/executor"
+	"github.com/skyzeper/telegram-bot/internal/services/notification"
+	"github.com/skyzeper/telegram-bot/internal/services/order"
+	"github.com/skyzeper/telegram-bot/internal/services/payment"
+	"github.com/skyzeper/telegram-bot/internal/services/referral"
+	"github.com/skyzeper/telegram-bot/internal/services/review"
+	"github.com/skyzeper/telegram-bot/internal/services/stats"
+	"github.com/skyzeper/telegram-bot/internal/services/user"
+	"github.com/skyzeper/telegram-bot/internal/state"
+	"github.com/skyzeper/telegram-bot/internal/utils"
 )
 
 func main() {
-	cfg, err := config.Load()
+	// Load configuration
+	cfg, err := utils.LoadConfig()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		utils.LogError(fmt.Errorf("failed to load config: %v", err))
+		return
 	}
 
-	dbConn, err := db.Connect(cfg)
+	// Initialize database
+	dbCfg := db.Config{
+		Host:     cfg.DBHost,
+		Port:     cfg.DBPort,
+		User:     cfg.DBUser,
+		Password: cfg.DBPassword,
+		DBName:   cfg.DBName,
+	}
+	dbConn, err := db.NewDB(dbCfg)
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		utils.LogError(fmt.Errorf("failed to initialize database: %v", err))
+		return
 	}
-	defer func() {
-		if err := dbConn.Close(); err != nil {
-			log.Printf("Failed to close DB: %v", err)
-		}
-	}()
+	defer dbConn.Close()
 
-	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
+	// Initialize Telegram bot
+	bot, err := tgbotapi.NewBotAPI(cfg.BotToken)
 	if err != nil {
-		log.Fatalf("Failed to initialize bot: invalid token: %v", err)
+		utils.LogError(fmt.Errorf("failed to initialize bot: %v", err))
+		return
 	}
+	bot.Debug = cfg.BotDebug
 
-	bot.Debug = cfg.Env == "dev"
+	// Initialize state
+	stateManager := state.NewState()
 
-	updateConfig := tgbotapi.NewUpdate(0)
-	updateConfig.Timeout = 60
+	// Initialize services
+	userService := user.NewService(user.NewPostgresRepository(dbConn))
+	orderService := order.NewService(order.NewPostgresRepository(dbConn))
+	executorService := executor.NewService(executor.NewPostgresRepository(dbConn))
+	paymentService := payment.NewService(payment.NewPostgresRepository(dbConn))
+	reviewService := review.NewService(review.NewPostgresRepository(dbConn))
+	referralService := referral.NewService(referral.NewPostgresRepository(dbConn))
+	chatService := chat.NewService(bot, chat.NewPostgresRepository(dbConn))
+	notificationService := notification.NewService(bot, notification.NewPostgresRepository(dbConn))
+	accountingService := accounting.NewService(accounting.NewPostgresRepository(dbConn))
+	statsService := stats.NewService(stats.NewPostgresRepository(dbConn))
 
-	updates := bot.GetUpdatesChan(updateConfig)
+	// Initialize security
+	securityChecker := security.NewSecurityChecker(userService)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Initialize menus
+	menuGenerator := menus.NewMenuGenerator()
 
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for update := range updates {
-				if update.Message != nil {
-					if security.CheckAccess(ctx, update.Message.From.ID, dbConn) {
-						handlers.HandleMessage(ctx, bot, update.Message, dbConn)
-					} else {
-						bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "🚫 Доступ запрещён."))
-					}
-				} else if update.CallbackQuery != nil {
-					if security.CheckAccess(ctx, update.CallbackQuery.From.ID, dbConn) {
-						handlers.HandleCallback(ctx, bot, update.CallbackQuery, dbConn)
-					}
-				}
-			}
-		}()
+	// Initialize callback handlers
+	ordersHandler := callbacks.NewOrdersHandler(
+		bot, securityChecker, menuGenerator, userService, orderService,
+		chatService, executorService, paymentService, reviewService, stateManager,
+	)
+	staffHandler := callbacks.NewStaffHandler(bot, securityChecker, menuGenerator, userService, stateManager)
+	contactHandler := callbacks.NewContactHandler(bot, securityChecker, menuGenerator, chatService, stateManager)
+	referralsHandler := callbacks.NewReferralsHandler(bot, securityChecker, menuGenerator, referralService, userService)
+	reviewsHandler := callbacks.NewReviewsHandler(bot, securityChecker, menuGenerator, reviewService, stateManager)
+	statsHandler := callbacks.NewStatsHandler(bot, securityChecker, menuGenerator, statsService)
+	callbackHandler := callbacks.NewCallbackHandler(
+		bot, securityChecker, menuGenerator, userService, stateManager,
+		ordersHandler, staffHandler, contactHandler, referralsHandler, reviewsHandler, statsHandler,
+	)
+
+	// Initialize main handler
+	mainHandler := handlers.NewHandler(
+		bot, securityChecker, menuGenerator, userService, orderService,
+		chatService, stateManager, callbackHandler, notificationService,
+	)
+
+	// Set up Telegram updates
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+	updates := bot.GetUpdatesChan(u)
+
+	// Process updates
+	for update := range updates {
+		mainHandler.HandleUpdate(&update)
 	}
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-
-	cancel()
-	wg.Wait()
-	log.Println("Bot stopped")
 }
